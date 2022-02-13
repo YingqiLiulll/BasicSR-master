@@ -1,5 +1,5 @@
 # general settings
-name: train_SwinIR_SRx4_scratch_P48W8_DIV2K_500k_B4G8
+name: 009_swinir_x4_s4h6c60mr0.5_DF2K_500k
 model_type: SwinIRModel
 scale: 4
 num_gpu: auto
@@ -8,31 +8,32 @@ manual_seed: 0
 # dataset and data loader settings
 datasets:
   train:
-    name: DIV2K
+    name: DF2K
     type: PairedImageDataset
-    dataroot_gt: datasets/DF2K/DIV2K_train_HR_sub
-    dataroot_lq: datasets/DF2K/DIV2K_train_LR_bicubic_X4_sub
-    meta_info_file: basicsr/data/meta_info/meta_info_DIV2K800sub_GT.txt
+    dataroot_gt: ../../datasets/DF2K/DF2K_train_HR_sub.lmdb
+    dataroot_lq: ../../datasets/DF2K/DF2K_train_LR_bicubic_X4_sub.lmdb
+    # meta_info_file: basicsr/data/meta_info/meta_info_DIV2K800sub_GT.txt
     filename_tmpl: '{}'
     io_backend:
-      type: disk
+      # type: disk
+      type: lmdb
 
-    gt_size: 192
-    use_flip: true
+    gt_size: 256
+    use_hflip: true
     use_rot: true
 
     # data loader
     use_shuffle: true
-    num_worker_per_gpu: 6
-    batch_size_per_gpu: 4
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 14
     dataset_enlarge_ratio: 1
     prefetch_mode: ~
 
   val:
-    name: Set5
+    name: DIV2K_valid
     type: PairedImageDataset
-    dataroot_gt: datasets/Set5/GTmod12
-    dataroot_lq: datasets/Set5/LRbicx4
+    dataroot_gt: ../../datasets/DIV2K/DIV2K_valid_HR
+    dataroot_lq: ../../datasets/DIV2K/DIV2K_valid_LR_bicubic/X4
     io_backend:
       type: disk
 
@@ -41,14 +42,14 @@ network_g:
   type: SwinIR
   upscale: 4
   in_chans: 3
-  img_size: 48
+  img_size: 64
   window_size: 8
   img_range: 1.
-  depths: [6, 6, 6, 6, 6, 6]
-  embed_dim: 180
-  num_heads: [6, 6, 6, 6, 6, 6]
-  mlp_ratio: 2
-  upsampler: 'pixelshuffle'
+  depths: [6, 6, 6, 6]
+  embed_dim: 60
+  num_heads: [6, 6, 6, 6]
+  mlp_ratio: 0.5
+  upsampler: 'pixelshuffledirect'
   resi_connection: '1conv'
 
 # path
@@ -61,7 +62,7 @@ path:
 train:
   ema_decay: 0.999
   optim_g:
-    type: Adam
+    type: AdamW
     lr: !!float 2e-4
     weight_decay: 0
     betas: [0.9, 0.99]
@@ -97,8 +98,9 @@ logger:
   save_checkpoint_freq: !!float 5e3
   use_tb_logger: true
   wandb:
-    project: ~
+    project: NTIRE2022
     resume_id: ~
+    entity: xpixel-ntire2022
 
 # dist training settings
 dist_params:
