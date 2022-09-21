@@ -1,9 +1,12 @@
 import math
+import turtle
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
-
+import argparse
+import numpy as np
 from basicsr.utils.registry import ARCH_REGISTRY
+
 
 def gumbel_softmax(x, dim, tau):
     gumbels = torch.rand_like(x)
@@ -121,6 +124,7 @@ class SMB(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False, n_layers=4):
         super(SMB, self).__init__()
 
+        # 实际上in_channels = out_channels = n_feats
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.n_layers = n_layers
@@ -130,6 +134,7 @@ class SMB(nn.Module):
 
         # channels mask
         self.ch_mask = nn.Parameter(torch.rand(1, out_channels, n_layers, 2))
+        # 推测应该大小是(1,64,4,2)
 
         # body
         body = []
@@ -137,6 +142,7 @@ class SMB(nn.Module):
         for _ in range(self.n_layers-1):
             body.append(nn.Conv2d(out_channels, out_channels, kernel_size, stride, padding, bias=bias))
         self.body = nn.Sequential(*body)
+        # 这么多层conv堆积起来的
 
         # collect
         self.collect = nn.Conv2d(out_channels*self.n_layers, out_channels, 1, 1, 0)
@@ -150,6 +156,7 @@ class SMB(nn.Module):
         self.ch_mask_round = ch_mask
 
         # number of channels
+        # d代表dense，s代表sparse
         self.d_in_num = []
         self.s_in_num = []
         self.d_out_num = []
@@ -157,8 +164,8 @@ class SMB(nn.Module):
 
         for i in range(self.n_layers):
             if i == 0:
-                self.d_in_num.append(self.in_channels)
-                self.s_in_num.append(0)
+                self.d_in_num.append(self.in_channels) # 最开始dense支路上应该是全部的in_channels
+                self.s_in_num.append(0) # 而sparse支路上为空
                 self.d_out_num.append(int(ch_mask[0, :, i, 0].sum(0)))
                 self.s_out_num.append(int(ch_mask[0, :, i, 1].sum(0)))
             else:
@@ -315,19 +322,26 @@ class SMB(nn.Module):
         '''
         if self.training:
             spa_mask = x[1]
+            # print('spa_mask_shape:', spa_mask.shape) spa_mask_shape: torch.Size([1, 1, 256, 256])
             ch_mask = gumbel_softmax(self.ch_mask, 3, self.tau)
+            # print('ch_mask_shape:', ch_mask.shape) ch_mask_shape: torch.Size([1, 64, 4, 2])
 
             out = []
             fea = x[0]
             for i in range(self.n_layers):
+                #使得for循环走4次，即i从0到3
                 if i == 0:
-                    fea = self.body[i](fea)
+                    fea = self.body[i](fea) # 先经过conv
                     fea = fea * ch_mask[:, :, i:i + 1, 1:] * spa_mask + fea * ch_mask[:, :, i:i + 1, :1]
+                    # fea = fea * ch_mask[:, :, 0, 1:] * spa_mask + fea * ch_mask[:, :, 0, :1] 即第1层layer
+                    # 由于spa_mask是留了两层，所以做ch_mask的时候也对应分开来，上面一层、下面一层，其中ch_mask取第0:1层layer的值
                 else:
                     fea_d = self.body[i](fea * ch_mask[:, :, i - 1:i, :1])
+                    # 根据我的推算，这里就是把第1、2、3层layer计算了一遍（并没有计算第4层layer）
                     fea_s = self.body[i](fea * ch_mask[:, :, i - 1:i, 1:])
                     fea = fea_d * ch_mask[:, :, i:i + 1, 1:] * spa_mask + fea_d * ch_mask[:, :, i:i + 1, :1] + \
                           fea_s * ch_mask[:, :, i:i + 1, 1:] * spa_mask + fea_s * ch_mask[:, :, i:i + 1, :1] * spa_mask
+                    # 感觉这个就是按层来做的
                 fea = self.relu(fea)
                 out.append(fea)
 
@@ -367,12 +381,12 @@ class SMM(nn.Module):
 
         # spatial mask
         self.spa_mask = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels//4, 3, 1, 1),
+            nn.Conv2d(in_channels, in_channels//4, 3, 1, 1), #channel数减为1/4
             nn.ReLU(True),
-            nn.AvgPool2d(2),
-            nn.Conv2d(in_channels//4, in_channels//4, 3, 1, 1),
+            nn.AvgPool2d(2), # 特征图缩小两倍
+            nn.Conv2d(in_channels//4, in_channels//4, 3, 1, 1), #等维度映射
             nn.ReLU(True),
-            nn.ConvTranspose2d(in_channels // 4, 2, 3, 2, 1, output_padding=1),
+            nn.ConvTranspose2d(in_channels // 4, 2, 3, 2, 1, output_padding=1), #转到一个二维的空间向量 R: 2*H*W
         )
 
         # body
@@ -390,9 +404,10 @@ class SMM(nn.Module):
         if self.training:
             spa_mask = self.spa_mask(x) #对应文章里的连续卷积
             spa_mask = gumbel_softmax(spa_mask, 1, self.tau)
-            #完成了sparse mask generation
+            # print('spa_mask_shape', spa_mask.shape)
+            #完成了sparse mask generation 大小为[1,2,256,256]
 
-            out, ch_mask = self.body([x, spa_mask[:, 1:, ...]])
+            out, ch_mask = self.body([x, spa_mask[:, 1:, ...]]) #取spa_mask的第二层channel上的值,所以送进去的spa_mask大小是[1,1,256,256]
             out = self.ca(out) + x
 
             return out, spa_mask[:, 1:, ...], ch_mask
@@ -406,22 +421,37 @@ class SMM(nn.Module):
 
             return out
 
-@ARCH_REGISTRY.register()
+# @ARCH_REGISTRY.register()
 class SMSR(nn.Module):
-    def __init__(self, args, conv=default_conv):
+    def __init__(self,
+                scale=4,
+                # patch_size=96,
+                rgb_range=255,
+                n_colors=3,
+                # chop=store_true,
+                # no_augment=store_true,
+                # act=relu,
+                n_resblocks=16,
+                n_feats=64,
+                res_scale=1,
+                # shift_mean=Ture,
+                # dilation=store_true,
+                # precision=single,
+                conv=default_conv):
         super(SMSR, self).__init__()
-
-        n_feats = args.n_feats
+        n_feats = n_feats
         kernel_size = 3
-        self.scale = int(args.scale[0])
+        # self.scale = int(scale[0])
+        self.scale = int(scale)
+
 
         # RGB mean for DIV2K
         rgb_mean = (0.4488, 0.4371, 0.4040)
         rgb_std = (1.0, 1.0, 1.0)
-        self.sub_mean = MeanShift(args.rgb_range, rgb_mean, rgb_std)
+        self.sub_mean = MeanShift(rgb_range, rgb_mean, rgb_std)
 
         # define head module
-        modules_head = [conv(args.n_colors, n_feats, kernel_size),
+        modules_head = [conv(n_colors, n_feats, kernel_size),
                         nn.ReLU(True),
                         conv(n_feats, n_feats, kernel_size)]
 
@@ -438,11 +468,11 @@ class SMSR(nn.Module):
 
         # define tail module
         modules_tail = [
-            nn.Conv2d(n_feats, args.n_colors*self.scale*self.scale, 3, 1, 1),
+            nn.Conv2d(n_feats, n_colors*self.scale*self.scale, 3, 1, 1),
             nn.PixelShuffle(self.scale),
         ]
 
-        self.add_mean = MeanShift(args.rgb_range, rgb_mean, rgb_std, 1)
+        self.add_mean = MeanShift(rgb_range, rgb_mean, rgb_std, 1)
 
         self.head = nn.Sequential(*modules_head)
         self.body = nn.Sequential(*modules_body)
@@ -450,7 +480,10 @@ class SMSR(nn.Module):
 
     def forward(self, x):
         x0 = self.sub_mean(x)
+        # print('x_shape', x.shape)
         x = self.head(x0)
+        # print('x_shape', x.shape)
+        #进来的数据做meanshift预处理
 
         if self.training:
             sparsity = []
@@ -458,12 +491,18 @@ class SMSR(nn.Module):
             fea = x
             for i in range(5):
                 fea, _spa_mask, _ch_mask = self.body[i](fea)
-                out_fea.append(fea)
+                #经过5个中间的SMM module
+                out_fea.append(fea) #每次都加到out_fea这个数组里面
                 sparsity.append(_spa_mask * _ch_mask[..., 1].view(1, -1, 1, 1) + torch.ones_like(_spa_mask) * _ch_mask[..., 0].view(1, -1, 1, 1))
             out_fea = self.collect(torch.cat(out_fea, 1)) + x
+
+            # print('out_fea_shape', out_fea.shape)
+            #最终的out_fea是在列维度上拼接起来，并且加上identity
             sparsity = torch.cat(sparsity, 0)
+            # sparsity在行维度上拼起来
 
             x = self.tail(out_fea) + F.interpolate(x0, scale_factor=self.scale, mode='bicubic', align_corners=False)
+            # 尾部的tail包括一个conv和pixelshuffle
             x = self.add_mean(x)
 
             return [x, sparsity]
@@ -481,8 +520,25 @@ class SMSR(nn.Module):
 
             return x
 
-if __name__ == '_main_':
-    model = SMSR()
+if __name__ == '__main__':
+    model = SMSR(
+        scale=4,
+        # patch_size=96,
+        rgb_range=255,
+        n_colors=3,
+        # chop='store_true',
+        # no_augment='store_true',
+        # act=relu,
+        n_resblocks=16,
+        n_feats=64,
+        res_scale=1,
+        # shift_mean='Ture',
+        # dilation='store_true',
+        # precision=single,
+        conv=default_conv
+    )
+    print(model)
     x = torch.randn((1, 3, 256, 256))
     x = model(x)
-    print(x.shape)
+    x_shape = np.array(x).shape
+    # print(x_shape)
