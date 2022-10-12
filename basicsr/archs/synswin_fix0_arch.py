@@ -3,13 +3,13 @@
 # Originally Written by Ze Liu, Modified by Jingyun Liang.
 
 import math
-from turtle import width
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
 from basicsr.utils.registry import ARCH_REGISTRY
-from arch_util import to_2tuple, trunc_normal_
+from .arch_util import to_2tuple, trunc_normal_
 
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
@@ -20,7 +20,7 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0], ) + (1, ) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
@@ -107,14 +107,37 @@ class WindowAttention(nn.Module):
         proj_drop (float, optional): Dropout ratio of output. Default: 0.0
     """
 
-    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop_rate=0.,
+                 attn_type='vanilla', d_hid=32, f=8, Dattn_dropout=0.):
 
         super().__init__()
         self.dim = dim
+        self.f = f
+        self.qkv_bias = qkv_bias
         self.window_size = window_size  # Wh, Ww
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim**-0.5
+        self.scale = qk_scale or head_dim ** -0.5
+        self.proj_drop_rate = proj_drop_rate
+        self.d_hid = d_hid
+        self.f = f
+
+
+        # add multiple attention mechanism
+
+        self.dropout = nn.Dropout(Dattn_dropout)
+
+        # self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+
+        self.attn_drop = nn.Dropout(attn_drop)
+
+        # self.batch_size = batch_size
+        self.attn_type = attn_type.lower()
+
+        self.attn_init()
+
+        self.softmax = nn.Softmax(dim=-1)
 
         # define a parameter table of relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -133,14 +156,74 @@ class WindowAttention(nn.Module):
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer('relative_position_index', relative_position_index)
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-
-        self.proj_drop = nn.Dropout(proj_drop)
-
         trunc_normal_(self.relative_position_bias_table, std=.02)
-        self.softmax = nn.Softmax(dim=-1)
+
+
+    def attn_init(self, ):
+        if self.attn_type == 'vanilla':
+            self.k = nn.Linear(self.dim, self.dim, bias=self.qkv_bias)
+            self.q = nn.Linear(self.dim, self.dim, bias=self.qkv_bias)
+
+            self.proj = nn.Linear(self.dim, self.dim)
+            self.proj_drop = nn.Dropout(self.proj_drop_rate)
+            
+        elif self.attn_type == 'vanilla_kout':
+            self.q = nn.Linear(self.dim, self.dim, bias=self.qkv_bias)
+
+            self.proj = nn.Linear(self.dim, self.dim)
+            self.proj_drop = nn.Dropout(self.proj_drop_rate)
+
+        elif self.attn_type == 'dense':
+            self.w_1 = nn.Linear(self.dim // self.num_heads, self.d_hid)  # 由原始input的维度d_k到中间的维度d_hid
+            self.w_2 = nn.Linear(self.d_hid, 64)  # 由中间的维度d_hid到设置的最大维度N
+            self.relu = nn.ReLU()
+            
+            # self.proj = nn.Linear(self.dim, self.dim)
+            # self.proj_drop = nn.Dropout(self.proj_drop_rate)
+            
+        elif self.attn_type == 'dense_gelu':
+            self.w_1 = nn.Linear(self.dim // self.num_heads, self.d_hid)  # 由原始input的维度d_k到中间的维度d_hid
+            self.w_2 = nn.Linear(self.d_hid, 64)  # 由中间的维度d_hid到设置的最大维度N
+            self.gelu = nn.GELU()
+        
+        elif self.attn_type == 'dense_mlp1':
+            self.w_1 = nn.Linear(self.dim // self.num_heads, 64)  # 由原始input的维度d_k到中间的维度d_hid
+            self.relu = nn.ReLU()
+            
+        elif self.attn_type == 'dense_mlp3':
+            self.w_1 = nn.Linear(self.dim // self.num_heads, 64)  # ��ԭʼinput��ά��d_k���м�һ���ά��d_hid1
+            self.w_2 = nn.Linear(64, 64)  # ��ԭʼinput��ά��d_k���м��ά��d_hid
+            self.w_3 = nn.Linear(64, 64)  # ��ԭʼinput��ά��d_k���м��ά��d_hid
+            self.relu = nn.ReLU()
+
+        elif self.attn_type == 'fact_dense_pose':
+            self.f_a = nn.Linear(self.dim // self.num_heads, self.f)
+            self.f_b = nn.Linear(self.dim // self.num_heads, 64 // self.f)
+
+            # self.f_a = nn.Linear(self.dim // self.num_heads, self.dim // self.num_heads)
+            # self.f_b = nn.Linear(self.dim // self.num_heads, self.dim // self.num_heads)
+
+        elif self.attn_type == 'fact_dense_pose1':
+            self.f_a = nn.Linear(self.dim, 8 * self.num_heads)
+            self.f_b = nn.Linear(self.dim, 8 * self.num_heads)
+            # self.proj = nn.Linear(self.dim, self.dim)
+            # self.proj_drop = nn.Dropout(self.proj_drop_rate)
+
+
+        elif self.attn_type == 'fact_dense_pose2':
+            self.f_a = nn.Linear(self.dim, 6 * self.num_heads)
+            self.f_b = nn.Linear(self.dim, 6 * self.num_heads)
+
+            self.proj = nn.Linear(self.dim, self.dim)
+            self.proj_drop = nn.Dropout(self.proj_drop_rate)
+
+        elif self.attn_type == 'fact_dense_pose3':
+            self.f_a = nn.Linear(self.dim, 6 * self.num_heads)
+            self.f_b = nn.Linear(self.dim, 6 * self.num_heads)
+
+            self.proj = nn.Linear(self.dim, self.dim)
+            self.proj_drop = nn.Dropout(self.proj_drop_rate)
+
 
     def forward(self, x, mask=None):
         """
@@ -149,46 +232,429 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         b_, n, c = x.shape
-        qkv = self.qkv(x).reshape(b_, n, 3, self.num_heads, c // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
 
-        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        attn = attn + relative_position_bias.unsqueeze(0)
+        if self.attn_type == "vanilla":
 
-        if mask is not None:
-            nw = mask.shape[0]
-            attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, n, n)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
+            q = self.q(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            k = self.k(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
 
-        attn = self.attn_drop(attn)
+            # q = q * self.scale
 
-        x = (attn @ v).transpose(1, 2).reshape(b_, n, c)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+            # print('q.shape', q.shape)
+            attn = (q @ k.transpose(-2, -1))
+            # print('attn.shape', attn.shape)
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.attn_drop(attn)
+
+            x = (attn @ v).transpose(1, 2).reshape(b_, n, c)
+
+            x = self.proj(x)
+            x = self.proj_drop(x)
+            
+        elif self.attn_type == "vanilla_kout":
+
+            q = self.q(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            k = q
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            q = q * self.scale
+
+            # print('q.shape', q.shape)
+            attn = (q @ k.transpose(-2, -1))
+            # print('attn.shape', attn.shape)
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.attn_drop(attn)
+
+            x = (attn @ v).transpose(1, 2).reshape(b_, n, c)
+
+            x = self.proj(x)
+            x = self.proj_drop(x)
+
+        elif self.attn_type == "vanilla_qkvout":
+
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            k = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            v = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            q = q * self.scale
+
+            # print('q.shape', q.shape)
+            attn = (q @ k.transpose(-2, -1))
+            # print('attn.shape', attn.shape)
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.attn_drop(attn)
+
+            x = (attn @ v).transpose(1, 2).reshape(b_, n, c)
+
+            # x = self.proj(x)
+            # x = self.proj_drop(x)
+
+        elif self.attn_type == "dense":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            #q = self.q(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3) #028
+
+            attn = self.w_2(self.relu(self.w_1(q)))
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+            
+            # x = self.proj(x)
+            # x = self.proj_drop(x)
+        
+        elif self.attn_type == "dense_gelu":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            #q = self.q(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3) #028
+
+            attn = self.w_2(self.gelu(self.w_1(q)))
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+
+        elif self.attn_type == "dense_mlp1":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            attn = self.relu(self.w_1(q))
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+        
+        elif self.attn_type == "dense_mlp3":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            attn = self.w_3(self.relu(self.w_2(self.relu(self.w_1(q)))))
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+
+
+        elif self.attn_type == "dense_pose":
+            qkv = self.qkv(x).reshape(b_, n, 3, self.num_heads, c // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+            attn = self.w_2(self.relu(self.w_1(q)))[:, :, :, :64]
+
+            print('attn_device', attn.device)
+
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+
+        elif self.attn_type == "fact_dense_pose":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            q = x.reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+            
+            # h_a = torch.repeat_interleave(self.f_a(q), 64 // self.f, -1)
+            h_a = torch.repeat_interleave(self.f_a(q), 4, -1)
+            # h_b = torch.repeat_interleave(self.f_b(q), self.f, -1)
+            h_b = torch.repeat_interleave(self.f_b(q), 4, -1)
+            
+            h_a = h_a * self.scale
+            
+            attn = torch.matmul(h_a, h_b.transpose(2, 3))
+
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+
+        elif self.attn_type == "fact_dense_pose1":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            a = self.f_a(x).reshape(b_, n, self.num_heads, 8).permute(0, 2, 1, 3)
+            b = self.f_b(x).reshape(b_, n, self.num_heads, 8).permute(0, 2, 1, 3)
+
+
+            h_a = torch.repeat_interleave(a, 4, -1)
+            h_b = torch.repeat_interleave(b, 4, -1)
+
+            h_a = h_a * self.scale * 0.25
+
+            attn = torch.matmul(h_a, h_b.transpose(2, 3))
+
+
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+            # x = self.proj(x)
+            # x = self.proj_drop(x)
+
+        elif self.attn_type == "fact_dense_pose2":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            a = self.f_a(x).reshape(b_, n, self.num_heads, 6).permute(0, 2, 1, 3)
+            # b = self.f_b(x).reshape(b_, n, self.num_heads, 6).permute(0, 2, 1, 3)
+
+
+            h_a = torch.repeat_interleave(a, 5, -1)
+            # h_b = torch.repeat_interleave(b, 4, -1)
+            h_b = h_a
+
+            h_a = h_a * self.scale * 0.2
+
+            attn = torch.matmul(h_a, h_b.transpose(2, 3))
+
+
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+            x = self.proj(x)
+            x = self.proj_drop(x)
+
+
+        elif self.attn_type == "fact_dense_pose3":
+            v = self.v(x).reshape(b_, n, self.num_heads, c // self.num_heads).permute(0, 2, 1, 3)
+
+            a = self.f_a(x).reshape(b_, n, self.num_heads, 6).permute(0, 2, 1, 3)
+            # b = self.f_b(x).reshape(b_, n, self.num_heads, 6).permute(0, 2, 1, 3)
+
+            a = a * self.scale
+
+            attn = torch.matmul(a, a.transpose(2, 3))
+
+
+            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+                -1)  # Wh*Ww,Wh*Ww,nH
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+            attn = attn + relative_position_bias.unsqueeze(0)
+
+            if mask is not None:
+                nw = mask.shape[0]
+                attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+                attn = attn.view(-1, self.num_heads, n, n)
+                attn = self.softmax(attn)
+            else:
+                attn = self.softmax(attn)
+
+            attn = self.dropout(attn)
+            x = torch.matmul(attn, v).transpose(1, 2).reshape(b_, n, c)
+            x = self.proj(x)
+            x = self.proj_drop(x)
+        # elif self.attn_type == 'random':
+        #     attn = torch.randn(b_, self.num_heads, 64, 64)
+        #     attn = attn.to(torch.device('cuda' if v.is_cuda else 'cpu'))
+        #     # attn = attn.to(torch.device('cuda'))
+        #     print('attn_device', attn.device)
+        #     print('v_device', v.device)
+        #
+        #     if mask is not None:
+        #         nw = mask.shape[0]
+        #         attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+        #         attn = attn.view(-1, self.num_heads, n, n)
+        #         attn = self.softmax(attn)
+        #     else:
+        #         attn = self.softmax(attn)
+        #
+        #     attn = self.dropout(attn)
+        #     x = torch.matmul(attn, v)
+        #
+        # elif self.attn_type == 'random_pose':
+        #     attn = torch.randn(b_, self.num_heads, 64, 64)
+        #
+        #     relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+        #         self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1],
+        #         -1)  # Wh*Ww,Wh*Ww,nH
+        #     relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        #     attn = attn + relative_position_bias.unsqueeze(0)
+        #
+        #     # attn = attn.to(torch.device('cuda'))
+        #
+        #     if mask is not None:
+        #         nw = mask.shape[0]
+        #         attn = attn.view(b_ // nw, nw, self.num_heads, n, n) + mask.unsqueeze(1).unsqueeze(0)
+        #         attn = attn.view(-1, self.num_heads, n, n)
+        #         attn = self.softmax(attn)
+        #     else:
+        #         attn = self.softmax(attn)
+        #
+        #     attn = self.dropout(attn)
+        #     x = torch.matmul(attn, v)
+
         return x
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
 
     def flops(self, n):
-        # calculate flops for 1 window with token length of n
-        flops = 0
-        # qkv = self.qkv(x)
-        flops += n * self.dim * 3 * self.dim
-        # attn = (q @ k.transpose(-2, -1))
-        flops += self.num_heads * n * (self.dim // self.num_heads) * n
-        #  x = (attn @ v)
-        flops += self.num_heads * n * n * (self.dim // self.num_heads)
-        # x = self.proj(x)
-        flops += n * self.dim * self.dim
+        if self.attn_type == "vanilla":
+            # calculate flops for 1 window with token length of n
+            flops = 0
+            # qkv = self.qkv(x)
+            flops += n * self.dim * 3 * self.dim
+            # attn = (q @ k.transpose(-2, -1))
+            flops += self.num_heads * n * (self.dim // self.num_heads) * n
+            #  x = (attn @ v)
+            flops += self.num_heads * n * n * (self.dim // self.num_heads)
+            # x = self.proj(x)
+            flops += n * self.dim * self.dim
+        elif self.attn_type == "vanilla_kout":
+            # calculate flops for 1 window with token length of n
+            flops = 0
+            # qv = self.qv(x)
+            flops += n * self.dim * 2 * self.dim
+            # attn = (q @ k.transpose(-2, -1))
+            flops += self.num_heads * n * (self.dim // self.num_heads) * n
+            #  x = (attn @ v)
+            flops += self.num_heads * n * n * (self.dim // self.num_heads)
+            # x = self.proj(x)
+            flops += n * self.dim * self.dim
+        elif self.attn_type == "fact_dense_pose2":
+            # calculate flops for 1 window with token length of n
+            flops = 0
+            # v = self.v(x)
+            flops += n * self.dim * self.dim
+            # a = self.f_a(x)
+            flops += n * self.dim * (6 * self.num_heads)
+            # attn = (q @ k.transpose(-2, -1))
+            flops += self.num_heads * n * (6 * 5) * n
+            #  x = (attn @ v)
+            flops += self.num_heads * n * n * (self.dim // self.num_heads)
+            # x = self.proj(x)
+            flops += n * self.dim * self.dim
+        elif self.attn_type == "fact_dense_pose3":
+            # calculate flops for 1 window with token length of n
+            flops = 0
+            # v = self.v(x)
+            flops += n * self.dim * self.dim
+            # a = self.f_a(x)
+            flops += n * self.dim * (6 * self.num_heads)
+            # attn = (q @ k.transpose(-2, -1))
+            flops += self.num_heads * n * 6 * n
+            #  x = (attn @ v)
+            flops += self.num_heads * n * n * (self.dim // self.num_heads)
+            # x = self.proj(x)
+            flops += n * self.dim * self.dim
+
         return flops
 
 
@@ -215,6 +681,7 @@ class SwinTransformerBlock(nn.Module):
                  dim,
                  input_resolution,
                  num_heads,
+                 attn_type,
                  window_size=7,
                  shift_size=0,
                  mlp_ratio=4.,
@@ -246,7 +713,8 @@ class SwinTransformerBlock(nn.Module):
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
             attn_drop=attn_drop,
-            proj_drop=drop)
+            attn_type=attn_type,
+            proj_drop_rate=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -287,6 +755,8 @@ class SwinTransformerBlock(nn.Module):
         # assert seq_len == h * w, "input feature has wrong size"
 
         shortcut = x
+        
+        
         x = self.norm1(x)
         x = x.view(b, h, w, c)
 
@@ -306,8 +776,11 @@ class SwinTransformerBlock(nn.Module):
         else:
             attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size).to(x.device))
 
+        #print('attn_windows.shape', attn_windows.shape)
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, c)
+        
+        #print('attn_windows.shape', attn_windows.shape)
         shifted_x = window_reverse(attn_windows, self.window_size, h, w)  # b h' w' c
 
         # reverse cyclic shift
@@ -317,8 +790,10 @@ class SwinTransformerBlock(nn.Module):
             x = shifted_x
         x = x.view(b, h * w, c)
 
+
         # FFN
         x = shortcut + self.drop_path(x)
+        #x = shortcut
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
@@ -417,6 +892,7 @@ class BasicLayer(nn.Module):
                  depth,
                  num_heads,
                  window_size,
+                 attn_type,
                  mlp_ratio=4.,
                  qkv_bias=True,
                  qk_scale=None,
@@ -446,6 +922,7 @@ class BasicLayer(nn.Module):
                 qk_scale=qk_scale,
                 drop=drop,
                 attn_drop=attn_drop,
+                attn_type=attn_type,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer) for i in range(depth)
         ])
@@ -507,6 +984,7 @@ class RSTB(nn.Module):
                  depth,
                  num_heads,
                  window_size,
+                 attn_type,
                  mlp_ratio=4.,
                  qkv_bias=True,
                  qk_scale=None,
@@ -535,6 +1013,7 @@ class RSTB(nn.Module):
             qk_scale=qk_scale,
             drop=drop,
             attn_drop=attn_drop,
+            attn_type=attn_type,
             drop_path=drop_path,
             norm_layer=norm_layer,
             downsample=downsample,
@@ -681,7 +1160,7 @@ class UpsampleOneStep(nn.Sequential):
         self.num_feat = num_feat
         self.input_resolution = input_resolution
         m = []
-        m.append(nn.Conv2d(num_feat, (scale**2) * num_out_ch, 3, 1, 1))
+        m.append(nn.Conv2d(num_feat, (scale ** 2) * num_out_ch, 3, 1, 1))
         m.append(nn.PixelShuffle(scale))
         super(UpsampleOneStep, self).__init__(*m)
 
@@ -691,8 +1170,8 @@ class UpsampleOneStep(nn.Sequential):
         return flops
 
 
-# @ARCH_REGISTRY.register()
-class SwinIR(nn.Module):
+@ARCH_REGISTRY.register()
+class SynSwinIR_Fix0(nn.Module):
     r""" SwinIR
         A PyTorch impl of : `SwinIR: Image Restoration Using Swin Transformer`, based on Swin Transformer.
 
@@ -742,8 +1221,9 @@ class SwinIR(nn.Module):
                  img_range=1.,
                  upsampler='',
                  resi_connection='1conv',
+                 attn_type='vanilla',
                  **kwargs):
-        super(SwinIR, self).__init__()
+        super(SynSwinIR_Fix0, self).__init__()
         num_in_ch = in_chans
         num_out_ch = in_chans
         num_feat = 64
@@ -810,6 +1290,7 @@ class SwinIR(nn.Module):
                 qk_scale=qk_scale,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
+                attn_type=attn_type,
                 drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],  # no impact on SR results
                 norm_layer=norm_layer,
                 downsample=None,
@@ -933,15 +1414,14 @@ class SwinIR(nn.Module):
         flops += self.upsample.flops()
         return flops
 
-
 if __name__ == '__main__':
     upscale = 4
-    window_size = 2
+    window_size = 8
     # height = (1024 // upscale // window_size + 1) * window_size
     height = 32
     # width = (720 // upscale // window_size + 1) * window_size
     width = 32
-    model = SwinIR(
+    model = SynSwinIR_Fix0(
         upscale=4,
         img_size=(height, width),
         window_size=window_size,
@@ -950,10 +1430,22 @@ if __name__ == '__main__':
         embed_dim=60,
         num_heads=[6, 6, 6, 6],
         mlp_ratio=2,
-        upsampler='pixelshuffledirect')
+        upsampler='pixelshuffledirect',
+        resi_connection='1conv',
+        attn_type='fact_dense_pose3')
     # print(model)
     print(height, width, model.flops() / 1e9)
 
     x = torch.randn((1, 3, height, width))
     x = model(x)
     print(x.shape)
+
+    # a = torch.randn(2,3)
+    # b = torch.randn(2,3)
+    # c = torch.matmul(a, b.transpose(0, 1))
+    # print('c', c)
+    # a1 = torch.repeat_interleave(a, 2, -1)
+    # b1 = torch.repeat_interleave(b, 2, -1)
+    # c1 = torch.matmul(a1, b1.transpose(0, 1))
+
+    # print('c1', c1)
