@@ -33,7 +33,7 @@ def ssim(y_true, y_pred):
     return ssim / denom
 
 
-path1 = 'C:/Users/13637/Desktop/Set5BIL/degra_bil/blur2_nearest_noise40'  # 指定输出结果文件夹
+path1 = 'C:/Users/13637/Desktop/lq/degra_bil/blur2_nearest_noise40'  # 指定输出结果文件夹
 path2 = 'C:/Users/13637/Desktop/Set5BIL/GTmod12'  # 指定原图文件夹
 f = os.listdir('C:/Users/13637/Desktop/Set5BIL/degra_bil/blur2_nearest_noise40')
 # f_nums = len(os.listdir(path1))
