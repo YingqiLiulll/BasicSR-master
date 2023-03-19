@@ -1,0 +1,124 @@
+# general settings
+name: 006_train_RRDBNet_DF2Kmultiple+OST_sub_500k_B4G1
+model_type: PretrainModel
+scale: 1
+num_gpu: auto  # auto: can infer from your visible devices automatically. official: 4 GPUs
+manual_seed: 0
+
+# ----------------- options for synthesizing training data in PretrainModel ----------------- #
+
+# the degradation process
+degradation_type: ['blur','noise','jpeg']
+gaussian_noise_prob: 0.5
+noise_range: [1, 30]
+poisson_scale_range: [0.05, 3]
+gray_noise_prob: 0.4
+jpeg_range: [30, 95]
+
+# gt_size: 128
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: DF2Kmultiple+OST_sub
+    type: PretrainV4Dataset
+    dataroot_gt: /home/yqliu/datasets/
+    # Note: you can only write the root path here for dataroot_gt
+    meta_info: /home/yqliu/datasets/meta_info/meta_info_DF2Kmultiscale+OST_sub.txt.txt
+    io_backend:
+      type: disk
+
+    kernel_list: ['iso', 'aniso', 'generalized_iso', 
+    'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+    kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    blur_sigma: [0.2, 3]
+    gt_size: 128
+    betag_range: [0.5, 4]
+    betap_range: [1, 2]
+    
+    use_hflip: False
+    use_rot: False
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 5
+    batch_size_per_gpu: 4
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  # Uncomment these for validation
+  val:
+    name: Urban100
+    type: PairedImageDataset
+    # data_type: img
+    dataroot_gt: /home/yqliu/datasets/test_pic/Urban100/GTmod12
+    dataroot_lq: /home/yqliu/datasets/test_pic/Urban100/LR_degra/blur2_bicubic_noise20_jepg50_upx4
+    # color: RGB
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: RRDBNet
+  num_in_ch: 3
+  num_out_ch: 3
+  num_feat: 64
+  num_block: 23
+  num_grow_ch: 32
+  scale: 1
+
+# path
+path:
+  pretrain_network_g: ~
+  param_key_g: params_ema
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  ema_decay: 0.999
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [500000]
+    gamma: 0.5
+
+  total_iter: 500000
+  warmup_iter: -1  # no warm up
+
+  # losses
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+# Uncomment these for validation
+# validation settings
+val:
+  val_freq: !!float 5e3
+  save_img: True
+
+  metrics:
+    psnr: # metric name
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+
+# logging settings
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: ClassSwin
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500

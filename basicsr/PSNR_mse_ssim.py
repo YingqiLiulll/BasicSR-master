@@ -33,20 +33,20 @@ def ssim(y_true, y_pred):
     return ssim / denom
 
 
-path1 = 'C:/Users/13637/Desktop/lq/degra_bil/blur2_nearest_noise40'  # 指定输出结果文件夹
-path2 = 'C:/Users/13637/Desktop/Set5BIL/GTmod12'  # 指定原图文件夹
-f = os.listdir('C:/Users/13637/Desktop/Set5BIL/degra_bil/blur2_nearest_noise40')
+path1 = 'F:/data_val_degra/Urban100/GTmod12'  # 指定输出结果文件夹
+path2 = 'F:/data_val_degra/Urban100/LR_degra_x1/blur_noise_jpeg'  # 指定原图文件夹
+f = os.listdir('F:/data_val_degra/Urban100/LR_degra_x1/blur_noise_jpeg')
 # f_nums = len(os.listdir(path1))
 list_psnr = []
 list_ssim = []
 list_mse = []
 for i in f:
-    pf_a = os.path.join('C:/Users/13637/Desktop/Set5BIL/degra_bil/blur2_nearest_noise40', i)
+    pf_a = os.path.join('F:/data_val_degra/Urban100/LR_degra_x1/blur_noise_jpeg', i)
     img_a = Image.open(pf_a).convert('RGB')
-    pf_b = os.path.join('C:/Users/13637/Desktop/Set5BIL/GTmod12', i)
+    pf_b = os.path.join('F:/data_val_degra/Urban100/GTmod12', i)
     img_b = Image.open(pf_b).convert('RGB')
-    img_a = np.array(img_a)
-    img_b = np.array(img_b)
+    img_a = np.array(img_a,dtype="float32")
+    img_b = np.array(img_b,dtype="float32")
 
     psnr_num = psnr(img_a, img_b)
     ssim_num = ssim(img_a, img_b)

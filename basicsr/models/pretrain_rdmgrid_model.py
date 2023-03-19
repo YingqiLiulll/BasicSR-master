@@ -14,7 +14,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 @MODEL_REGISTRY.register()
-class PretrainModel(SRModel):
+class PretrainRdmgridModel(SRModel):
     """Pretrain Model: Design for more efficient pretraining.
 
     It mainly performs:
@@ -23,7 +23,7 @@ class PretrainModel(SRModel):
     """
 
     def __init__(self, opt):
-        super(PretrainModel, self).__init__(opt)
+        super(PretrainRdmgridModel, self).__init__(opt)
         self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
 
     # ----------------------- grid partition & reverse ----------------------- #
@@ -74,7 +74,7 @@ class PretrainModel(SRModel):
             self.gt = data['gt'].to(self.device)
             self.kernel = data['kernel'].to(self.device)
             self.degradation_type = self.opt['degradation_type']
-            
+            self.grid_size = self.opt['grid_size']
             c, h, w = self.gt.size()[1:4]
             # print("h,w:",h,w)
             # print("self.gt.size:",self.gt.size())
@@ -109,8 +109,10 @@ class PretrainModel(SRModel):
                 list.append(degra_img)
 
             degra_imgStack = torch.stack(list,dim=0)
+            grid_size = random.choice(self.grid_size)
+            print("grid_size:",grid_size)
             # print("degra_imgStack.size:",degra_imgStack.size())
-            degra_grids, num_grids = self.grid_partition(degra_imgStack,16)
+            degra_grids, num_grids = self.grid_partition(degra_imgStack, grid_size)
             # return grids: (N, B, C, num_grids, grid_size, grid_size)
 
             # shuffle tensor
@@ -124,7 +126,7 @@ class PretrainModel(SRModel):
                 degra_grids[:,:,:,i,:,:] = shuffle_grid
 
             # print("degra_grids_shape:",degra_grids.shape)
-            degra_shffle_imgStack = self.grid_reverse(degra_grids, 16, h, w).permute(1, 0, 2, 3, 4).reshape(-1, c, h, w)
+            degra_shffle_imgStack = self.grid_reverse(degra_grids, grid_size, h, w).permute(1, 0, 2, 3, 4).reshape(-1, c, h, w)
             # print("degra_shffle_imgStack:",degra_shffle_imgStack.shape)
             
             self.lq = degra_shffle_imgStack.to(self.device)
@@ -222,7 +224,7 @@ class PretrainModel(SRModel):
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         # do not use the synthetic process during validation
         self.is_train = False
-        super(PretrainModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        super(PretrainRdmgridModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
         self.is_train = True
 
 class UnNormalize(object):

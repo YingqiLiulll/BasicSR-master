@@ -8,15 +8,15 @@ import time
 import torch
 from PIL import Image
 from io import BytesIO
-from basicsr.data.degradations import random_bivariate_Gaussian
+from basicsr.data.degradations import random_bivariate_Gaussian,circular_lowpass_kernel, random_mixed_kernels
 from basicsr.data.transforms import augment
-from basicsr.utils import FileClient, get_root_logger, imfrombytes, img2tensor
+from basicsr.utils import FileClient, bgr2ycbcr, get_root_logger, imfrombytes, img2tensor, scandir
 from basicsr.utils.registry import DATASET_REGISTRY
 from torch.utils import data as data
 
 
 @DATASET_REGISTRY.register()
-class PretrainDataset(data.Dataset):
+class PretrainV4Dataset(data.Dataset):
     """Dataset used for Pretrain model:
     data process goal: divide a 128x128 image into 8 16x16 grids, every grid is given a kind of random degradation.
 
@@ -34,7 +34,7 @@ class PretrainDataset(data.Dataset):
             Please see more options in the codes.
     """
     def __init__(self, opt):
-        super(PretrainDataset, self).__init__()
+        super(PretrainV4Dataset, self).__init__()
         self.opt = opt
         self.file_client = None
         self.io_backend_opt = opt['io_backend']
@@ -54,12 +54,59 @@ class PretrainDataset(data.Dataset):
             with open(self.opt['meta_info']) as fin:
                 paths = [line.strip().split(' ')[0] for line in fin]
                 self.paths = [os.path.join(self.gt_folder, v) for v in paths]
+                # print("self.paths:",self.paths)
 
         # -------------------------------- the degradation settings -------------------------------- #
 
         # blur settings for degradation
-        self.kernel_range = [2 * v + 1 for v in range(1, 4)]  # kernel size ranges from 7 to 21
+        self.kernel_range = [2 * v + 1 for v in range(3, 11)]  # kernel size ranges from 7 to 21
         self.blur_sigma = opt['blur_sigma']
+        self.kernel_list = opt['kernel_list']
+        self.kernel_prob = opt['kernel_prob']  # a list for each kernel probability
+        self.betag_range = opt['betag_range']  # betag used in generalized Gaussian blur kernels
+        self.betap_range = opt['betap_range']  # betap used in plateau blur kernels
+
+    def random_crop(self, img_gts, gt_patch_size, gt_path=None):
+        """Random crop. Support Numpy array and Tensor inputs.
+
+        It crops lists of gt images.
+
+        Args:
+            img_gts (list[ndarray] | ndarray | list[Tensor] | Tensor): GT images. Note that all images
+                should have the same shape. If the input is an ndarray, it will
+                be transformed to a list containing itself.
+            gt_patch_size (int): GT patch size.
+            gt_path (str): Path to ground-truth. Default: None.
+
+        Returns:
+            list[ndarray] | ndarray: GT images. If returned results
+                only have one element, just return ndarray.
+        """
+        if not isinstance(img_gts, list):
+            img_gts = [img_gts]
+        # determine input type: Numpy array or Tensor
+        input_type = 'Tensor' if torch.is_tensor(img_gts[0]) else 'Numpy'
+        if input_type == 'Tensor':
+            h_gt, w_gt = img_gts[0].size()[-2:]
+        else:
+            h_gt, w_gt = img_gts[0].shape[0:2]
+        if h_gt < gt_patch_size or w_gt < gt_patch_size:
+            raise ValueError(f'GT ({h_gt}, {w_gt}) is smaller than patch size '
+                            f'({gt_patch_size}, {gt_patch_size}). '
+                            f'Please remove {gt_path}.')
+        # randomly choose top and left coordinates for gt patch
+        top = random.randint(0, h_gt - gt_patch_size)
+        left = random.randint(0, w_gt - gt_patch_size)
+
+        # crop gt patch
+        if input_type == 'Tensor':
+            img_gts = [v[:, :, top:top + gt_patch_size, left:left + gt_patch_size] for v in img_gts]
+        else:
+            img_gts = [v[top:top + gt_patch_size, left:left + gt_patch_size, ...] for v in img_gts]
+        if len(img_gts) == 1:
+            img_gts = img_gts[0]
+        return img_gts
+
 
     def __getitem__(self, index):
         if self.file_client is None:
@@ -91,13 +138,18 @@ class PretrainDataset(data.Dataset):
         img_gt = imfrombytes(img_bytes, float32=True)
         # img_gt is numpy
 
-        # -------------------- Do augmentation for training: flip, rotation -------------------- #
+        # -------------- Do augmentation for training: random_crop, flip, rotation -------------------- #
+        gt_size = self.opt['gt_size']
+        img_gt = self.random_crop(img_gt, gt_size, gt_path)
         img_gt = augment(img_gt, self.opt['use_hflip'], self.opt['use_rot'])
 
-        # crop or pad to 128
-        # TODO: 128 is hard-coded. You may change it accordingly
+        # color space transform
+        if 'color' in self.opt and self.opt['color'] == 'y':
+            img_gt = bgr2ycbcr(img_gt, y_only=True)[..., None]
+
+        # crop or pad to gt_size
         h, w = img_gt.shape[0:2]
-        crop_pad_size = 128
+        crop_pad_size = self.opt['gt_size']
         # pad
         if h < crop_pad_size or w < crop_pad_size:
             pad_h = max(0, crop_pad_size - h)
@@ -116,10 +168,19 @@ class PretrainDataset(data.Dataset):
         # if needed, could randomly select one type of degradation one time, repeat this option for eight times
 
         kernel_size = random.choice(self.kernel_range)
-        kernel = random_bivariate_Gaussian(
-                        kernel_size, sigma_x_range=self.blur_sigma, sigma_y_range=self.blur_sigma, rotation_range=[-math.pi, math.pi], noise_range=None, isotropic=True)
+        kernel = random_mixed_kernels(
+            self.kernel_list,
+            self.kernel_prob,
+            kernel_size,
+            self.blur_sigma,
+            self.blur_sigma, [-math.pi, math.pi],
+            self.betag_range,
+            self.betap_range,
+            noise_range=None)
+        # kernel = random_bivariate_Gaussian(
+        #                 kernel_size, sigma_x_range=self.blur_sigma, sigma_y_range=self.blur_sigma, rotation_range=[-math.pi, math.pi], noise_range=None, isotropic=True)
         # pad kernel
-        pad_size = (7 - kernel_size) // 2
+        pad_size = (21 - kernel_size) // 2
         kernel = np.pad(kernel, ((pad_size, pad_size), (pad_size, pad_size)))
 
     # BGR to RGB, HWC to CHW, numpy to tensor

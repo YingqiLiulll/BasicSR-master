@@ -1,8 +1,8 @@
 # general settings
-name: train_SwinIR_SRx2_scratch_P48W8_DIV2K_500k_B4G8
+name: 013_SwinIR_branch1_kout_no_repeat_P32W8_DIV2Kclass1_500k_B8G1
 model_type: SwinIRModel
-scale: 2
-num_gpu: auto
+scale: 4
+num_gpu: 1
 manual_seed: 0
 
 # dataset and data loader settings
@@ -10,45 +10,56 @@ datasets:
   train:
     name: DIV2K
     type: PairedImageDataset
-    dataroot_gt: datasets/DF2K/DIV2K_train_HR_sub
-    dataroot_lq: datasets/DF2K/DIV2K_train_LR_bicubic_X2_sub
-    meta_info_file: basicsr/data/meta_info/meta_info_DIV2K800sub_GT.txt
+    dataroot_gt: /home/yqliu/projects/ClassSwin/data/DIV2K_scale_sub_psnr_GT_class1
+    dataroot_lq: /home/yqliu/projects/ClassSwin/data/DIV2K_scale_sub_psnr_LR_class1
+    meta_info_file: basicsr/data/meta_info/meta_info_DIV2K_scale_sub_psnr_GT_class1.txt
     filename_tmpl: '{}'
     io_backend:
       type: disk
+      # type: lmdb
 
-    gt_size: 96
+    gt_size: 128
     use_hflip: true
     use_rot: true
 
     # data loader
-    num_worker_per_gpu: 6
-    batch_size_per_gpu: 4
+    use_shuffle: true
+    num_worker_per_gpu: 3
+    batch_size_per_gpu: 8
     dataset_enlarge_ratio: 1
     prefetch_mode: ~
 
   val:
     name: Set5
     type: PairedImageDataset
-    dataroot_gt: datasets/Set5/GTmod12
-    dataroot_lq: datasets/Set5/LRbicx2
+    dataroot_gt: /home/yqliu/datasets/Set5/HR/
+    dataroot_lq: /home/yqliu/datasets/Set5/LRbicx4/
+    io_backend:
+      type: disk
+
+  val_1:
+    name: DIV2K_val10
+    type: PairedImageDataset
+    dataroot_gt: /home/yqliu/projects/ClassSwin/data/DIV2K_valid10_HR
+    dataroot_lq: /home/yqliu/projects/ClassSwin/data/DIV2K_valid_LR10_bicubic/x4
     io_backend:
       type: disk
 
 # network structures
 network_g:
-  type: SwinIR
-  upscale: 2
+  type: SynSwinIR_Fix0
+  upscale: 4
   in_chans: 3
-  img_size: 48
+  img_size: 32
   window_size: 8
   img_range: 1.
-  depths: [6, 6, 6, 6, 6, 6]
-  embed_dim: 180
-  num_heads: [6, 6, 6, 6, 6, 6]
+  depths: [6, 6, 6, 6]
+  embed_dim: 60
+  num_heads: [6, 6, 6, 6]
   mlp_ratio: 2
-  upsampler: 'pixelshuffle'
+  upsampler: 'pixelshuffledirect'
   resi_connection: '1conv'
+  attn_type: 'fact_dense_pose3'
 
 # path
 path:
@@ -87,7 +98,12 @@ val:
   metrics:
     psnr: # metric name, can be arbitrary
       type: calculate_psnr
-      crop_border: 2
+      crop_border: 4
+      test_y_channel: false
+
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
       test_y_channel: false
 
 # logging settings
@@ -96,8 +112,10 @@ logger:
   save_checkpoint_freq: !!float 5e3
   use_tb_logger: true
   wandb:
-    project: ~
+    project: ClassSwin
+    #project: ~
     resume_id: ~
+
 
 # dist training settings
 dist_params:

@@ -14,7 +14,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 @MODEL_REGISTRY.register()
-class PretrainModel(SRModel):
+class PretrainWogridModel(SRModel):
     """Pretrain Model: Design for more efficient pretraining.
 
     It mainly performs:
@@ -23,45 +23,8 @@ class PretrainModel(SRModel):
     """
 
     def __init__(self, opt):
-        super(PretrainModel, self).__init__(opt)
+        super(PretrainWogridModel, self).__init__(opt)
         self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
-
-    # ----------------------- grid partition & reverse ----------------------- #
-
-    def grid_partition(self, x, grid_size):
-        """
-        Args:
-            x: (N, B, C, H, W) tensor //N:number of degradation augment /B:batchsize
-            grid_size (int): grid size
-
-        Returns:
-            grids: (N, B, C, num_grids, grid_size, grid_size)
-        """
-        N, B, C, H, W = x.size()[0:5]
-        # print("N, B, C, H, W :", N, B, C, H, W)
-        x = x.view(N, B, C, H // grid_size, grid_size, W // grid_size, grid_size)
-        # print("x_size:",x.size)
-        num_grids = (H // grid_size)*(W // grid_size)
-        grids = x.permute(0, 1, 2, 3, 5, 4, 6).contiguous().view(N, B, C, num_grids, grid_size, grid_size)
-        # print('grids:',grids.shape)
-        return grids, num_grids
-
-    def grid_reverse(self, grids, grid_size, h, w):
-        """
-        Args:
-            grids: (n, b, c, num_grids, grid_size, grid_size)
-            grid_size (int): grid size
-            h (int): Height of image
-            w (int): Width of image
-
-        Returns:
-            x: (n, b, c, h, w)
-        """
-        n,b,c = grids.size()[0:3]
-        x = grids.view(n, b, c, h // grid_size, w // grid_size, grid_size, grid_size)
-        x = x.permute(0, 1, 2, 3, 5, 4, 6).contiguous().view(n, b, c, h, w)
-
-        return x
 
     @torch.no_grad()
     def feed_data(self, data):
@@ -110,24 +73,9 @@ class PretrainModel(SRModel):
 
             degra_imgStack = torch.stack(list,dim=0)
             # print("degra_imgStack.size:",degra_imgStack.size())
-            degra_grids, num_grids = self.grid_partition(degra_imgStack,16)
-            # return grids: (N, B, C, num_grids, grid_size, grid_size)
-
-            # shuffle tensor
-            # it's more troublesome than directly shuffle on numpy, 
-            # you can also change degra_grids from tensor to numpy, and use "np.random.shuffle"
-            for i in range(0,num_grids):
-                idx = torch.randperm(degra_grids.shape[0])
-                current_grid = degra_grids[:,:,:,i,:,:]
-                # print("current_grid:",current_grid.size())
-                shuffle_grid = current_grid[idx,:,:,:,:]
-                degra_grids[:,:,:,i,:,:] = shuffle_grid
-
-            # print("degra_grids_shape:",degra_grids.shape)
-            degra_shffle_imgStack = self.grid_reverse(degra_grids, 16, h, w).permute(1, 0, 2, 3, 4).reshape(-1, c, h, w)
-            # print("degra_shffle_imgStack:",degra_shffle_imgStack.shape)
+            degra_imgStack = degra_imgStack.permute(1, 0, 2, 3, 4).reshape(-1, c, h, w)
             
-            self.lq = degra_shffle_imgStack.to(self.device)
+            self.lq = degra_imgStack.to(self.device)
             # repeat gt for eight times
             lt=[]
             for i in range(0,self.gt.size(0)):
@@ -140,31 +88,31 @@ class PretrainModel(SRModel):
             # print("self.gt:",self.gt)
 
             # Visualize the gt data
-            # for i in range(len(self.gt)):
-            #     # print(self.gt[i].shape)
-            #     # (3,128,128)
-            #     # 复制一份
-            #     input_tensor = self.gt[i].clone().detach()
-            #     # 到cpu
-            #     input_tensor = input_tensor.to(torch.device('cpu'))
+            for i in range(len(self.gt)):
+                # print(self.gt[i].shape)
+                # (3,128,128)
+                # 复制一份
+                input_tensor = self.gt[i].clone().detach()
+                # 到cpu
+                input_tensor = input_tensor.to(torch.device('cpu'))
 
-            #     # 反归一化操作，但这里不需要反归一化
-            #     # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-            #     # input_tensor = unorm(input_tensor)
+                # 反归一化操作，但这里不需要反归一化
+                # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+                # input_tensor = unorm(input_tensor)
 
-            #     vutils.save_image(input_tensor, '/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/gt_{}.png'.format(i))
+                vutils.save_image(input_tensor, '/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/gt_{}.png'.format(i))
 
             # Visualize the lq data
-            # for i in range(len(self.lq)):
-            #     input_tensor = self.lq[i].clone().detach()
-            #     # 到cpu
-            #     input_tensor = input_tensor.to(torch.device('cpu'))
+            for i in range(len(self.lq)):
+                input_tensor = self.lq[i].clone().detach()
+                # 到cpu
+                input_tensor = input_tensor.to(torch.device('cpu'))
 
-            #     # 反归一化
-            #     # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-            #     # input_tensor = unorm(input_tensor)
+                # 反归一化
+                # unorm = UnNormalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+                # input_tensor = unorm(input_tensor)
 
-            #     vutils.save_image(input_tensor, '/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/lq_{}.png'.format(i))
+                vutils.save_image(input_tensor, '/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/lq_{}.png'.format(i))
             
 
             # Uncomment these for SR task,
@@ -222,7 +170,7 @@ class PretrainModel(SRModel):
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         # do not use the synthetic process during validation
         self.is_train = False
-        super(PretrainModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        super(PretrainWogridModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
         self.is_train = True
 
 class UnNormalize(object):

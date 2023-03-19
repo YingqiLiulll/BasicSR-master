@@ -260,10 +260,7 @@ if __name__ == '__main__':
 
             # only nearest
             img_copy = img_GT.copy()
-            img_LR=donw_sample_nearest(img_co
-            
-            
-            py)
+            img_LR=donw_sample_nearest(img_copy)
             save_dir=os.path.join(save_LR_folder,'nearest')
             check_dir(save_dir)
             img_LR.save(os.path.join(save_dir,os.path.basename(path_GT)))
