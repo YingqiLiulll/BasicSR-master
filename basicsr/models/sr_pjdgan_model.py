@@ -6,10 +6,11 @@ from basicsr.losses import build_loss
 from basicsr.utils import get_root_logger
 from basicsr.utils.registry import MODEL_REGISTRY
 from .sr_model import SRModel
+from basicsr.pg_modules.discriminator import ProjectedDiscriminator
 
 
 @MODEL_REGISTRY.register()
-class SRGANModel(SRModel):
+class SRPjdGANModel(SRModel):
     """SRGAN model for single image super-resolution."""
 
     def init_training_settings(self):
@@ -32,7 +33,8 @@ class SRGANModel(SRModel):
             self.net_g_ema.eval()
 
         # define network net_d
-        self.net_d = build_network(self.opt['network_d'])
+        self.net_d = ProjectedDiscriminator()
+        # self.net_d = build_network(self.opt['network_d'])
         self.net_d = self.model_to_device(self.net_d)
         self.print_network(self.net_d)
 
@@ -119,8 +121,10 @@ class SRGANModel(SRModel):
         # optimize net_d
         for p in self.net_d.parameters():
             p.requires_grad = True
+            self.net_d.feature_network.requires_grad_(False)
 
         self.optimizer_d.zero_grad()
+
         # real
         real_d_pred = self.net_d(self.gt)
         l_d_real = self.cri_gan(real_d_pred, True, is_disc=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 def main():
     # folder = '/home/yqliu/projects/ClassSwin/data/DIV2K_scale_sub_psnr_LR_class2'
-    folder = 'C:/Users/13637/Desktop/test_LR'
+    folder = 'F:/Real-Test/Challenge/Challenge/Canon/Pair_test/HR'
     DIV2K(folder)
     print('Finished.')
 
@@ -19,11 +19,12 @@ def DIV2K(path):
         index += 1
         # print("img_path:",img_path)
         basename, ext = os.path.splitext(img_path)
+        new_basename = basename.strip(' ')
         # parts = basename.split('-')
-        if '_x1' in basename:
-            new_basename = basename.replace('_x1',' ').strip(' ')
-        elif '_x4' in basename:
-            new_basename = basename.replace('_x4',' ').strip('')
+        # if ' 3' in basename:
+        #     new_basename = basename.replace(' 3',' ').strip(' ')
+        # elif '_HR' in basename:
+        #     new_basename = basename.replace('_HR',' ').strip('')
         new_path = new_basename + ext
         os.rename(os.path.join(path, img_path), os.path.join(path, new_path))
         # print("basename, ext:",basename, ext)

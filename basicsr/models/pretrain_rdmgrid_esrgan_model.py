@@ -340,7 +340,7 @@ class PretrainRdmgridRealESRGANModel(SRGANModel):
             l_g_gan = self.cri_gan(fake_g_pred, True, is_disc=False)
             # gan_loss的参数(input (Tensor), target_is_real, is_disc: Whether the loss for discriminators or not)
             l_g_total += l_g_gan
-            loss_dict['l_g_gan'] = l_g_gan
+            loss_dict['l_g_gan'] = l_g_gan #loss_dict[’新的loss’] = 新的loss，即可完成loss在日志中的添加
 
             l_g_total.backward() #把net_g的loss反向传播
             self.optimizer_g.step() #把net_g的参数更新

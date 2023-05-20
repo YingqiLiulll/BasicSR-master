@@ -110,8 +110,8 @@ class ClassSR_Model(BaseModel):
         optim_params = []
         if self.opt['fix_SR_module']:
             for k, v in self.net_g.named_parameters():  # can optimize for a part of the model
-                if v.grad is None:
-                    print(v)
+                # if v.grad is None:
+                #     print(v)
                 if v.requires_grad and "class" not in k:
                     v.requires_grad=False
         for k, v in self.net_g.named_parameters():
@@ -484,6 +484,8 @@ class ClassSR_Model(BaseModel):
                 pbar.set_description(f'Test {img_name}')
         if use_pbar:
             pbar.close()
+        
+        flops,percent=self.cal_FLOPs(self.which_model, num_ress)
         if num_ress[0]==0:
             num_ress[0]=1
         if num_ress[1]==0:
@@ -493,6 +495,8 @@ class ClassSR_Model(BaseModel):
 
         # add tensorboard logger
         if tb_logger:
+            tb_logger.add_scalar('FLOPs', flops, current_iter)
+            tb_logger.add_scalar('Percent', percent, current_iter)
             tb_logger.add_scalar('class1_num', num_ress[0], current_iter)
             tb_logger.add_scalar('class2_num', num_ress[1], current_iter)
             tb_logger.add_scalar('class3_num', num_ress[2], current_iter)
@@ -524,6 +528,14 @@ class ClassSR_Model(BaseModel):
             for metric, value in self.metric_results.items():
                 tb_logger.add_scalar(f'metrics/{dataset_name}/{metric}', value, current_iter)
             
+    def cal_FLOPs(self, which_model, num_ress):
+        if which_model =='classSR_3class_swinir':
+            flops = ((0.87 * num_ress[0] + 0.90 * num_ress[1] + 1.05 * num_ress[2]) / sum(num_ress))
+            percent=flops/1.05
+        elif which_model=='classSR_3class_swinir_syn':
+            flops = (0.885 * num_ress[0] + 0.958 * num_ress[1] + 1.05 * num_ress[2]) / sum(num_ress)
+            percent = flops / 1.05
+        return flops,percent
 
     def get_current_visuals(self):
         out_dict = OrderedDict()

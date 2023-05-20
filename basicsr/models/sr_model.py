@@ -10,6 +10,9 @@ from basicsr.utils import get_root_logger, imwrite, tensor2img
 from basicsr.utils.registry import MODEL_REGISTRY
 from .base_model import BaseModel
 
+from PIL import Image
+import matplotlib.pyplot as plt
+
 
 @MODEL_REGISTRY.register()
 class SRModel(BaseModel):
@@ -86,8 +89,36 @@ class SRModel(BaseModel):
 
     def feed_data(self, data):
         self.lq = data['lq'].to(self.device)
+        ## Visualize the lq data
+        # self.lq_path = data['lq_path']
+        # print("lq_path:", self.lq_path)
+        # print(len(self.lq))
+        # for i in range(len(self.lq)):
+        #     print(self.lq[i].shape)
+        #     plt.figure()
+        #     img = self.lq[i].cpu().numpy().transpose(1, 2, 0)
+        #     # 反Normalize操作
+        #     img = (img * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]) * 255
+        #     # print("img:",img.astype('uint8'))
+        #     plt.imshow(img.astype('uint8'))
+        #     plt.savefig('/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/lq_{}.png'.format(i))
+        #     plt.show()
+
         if 'gt' in data:
             self.gt = data['gt'].to(self.device)
+        ## Visualize the gt data
+        # self.gt_path = data['gt_path']
+        # print("gt_path:", self.gt_path)
+        # for i in range(len(self.gt)):
+        #     # print(self.lq[i].shape)
+        #     plt.figure()
+        #     img = self.gt[i].cpu().numpy().transpose(1, 2, 0)
+        #     # 反Normalize操作
+        #     img = (img * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]) * 255
+        #     # print("img:",img.astype('uint8'))
+        #     plt.imshow(img.astype('uint8'))
+        #     plt.savefig('/home/yqliu/projects/ClassSwin/BasicSR/results/test_pic/gt_{}.png'.format(i))
+        #     plt.show()
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
@@ -153,6 +184,14 @@ class SRModel(BaseModel):
 
         for idx, val_data in enumerate(dataloader):
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
+            # # ##
+            y = list(val_data.values())
+            # print("lq:",y[0])
+            # print("gt:",y[1])
+            # print("val_data:",y)
+            # print("lq_path:",y[2])
+            # print("gt_path:",y[3])
+            # # ###
             self.feed_data(val_data)
             self.test()
 
@@ -189,6 +228,7 @@ class SRModel(BaseModel):
             if use_pbar:
                 pbar.update(1)
                 pbar.set_description(f'Test {img_name}')
+
         if use_pbar:
             pbar.close()
 

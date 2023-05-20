@@ -1,29 +1,28 @@
 import numpy as np
 import random
 import torch
-from collections import OrderedDict
 from torch.nn import functional as F
 
 from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 from basicsr.data.transforms import paired_random_crop
-from basicsr.losses.loss_util import get_refined_artifact_map
-from basicsr.models.srgan_model import SRGANModel
+from basicsr.models.sr_model import SRModel
 from basicsr.utils import DiffJPEG, USMSharp
 from basicsr.utils.img_process_util import filter2D
 from basicsr.utils.registry import MODEL_REGISTRY
 
 
 @MODEL_REGISTRY.register(suffix='basicsr')
-class RealESRGANModel(SRGANModel):
-    """RealESRGAN Model for Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data.
+class SPicRealESRNetModel(SRModel):
+    """RealESRNet Model for Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data.
 
+    It is trained without GAN losses.
     It mainly performs:
     1. randomly synthesize LQ images in GPU tensors
     2. optimize the networks with GAN training.
     """
 
     def __init__(self, opt):
-        super(RealESRGANModel, self).__init__(opt)
+        super(SPicRealESRNetModel, self).__init__(opt)
         self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
         self.usm_sharpener = USMSharp().cuda()  # do usm sharpening
         self.queue_size = opt.get('queue_size', 180)
@@ -72,17 +71,20 @@ class RealESRGANModel(SRGANModel):
         if self.is_train and self.opt.get('high_order_degradation', True):
             # training data synthesis
             self.gt = data['gt'].to(self.device)
-            self.gt_usm = self.usm_sharpener(self.gt)
+            # USM sharpen the GT images
+            if self.opt['gt_usm'] is True:
+                self.gt = self.usm_sharpener(self.gt)
 
             self.kernel1 = data['kernel1'].to(self.device)
             self.kernel2 = data['kernel2'].to(self.device)
             self.sinc_kernel = data['sinc_kernel'].to(self.device)
+            self.S_gt = data['S_gt'].to(self.device)
 
             ori_h, ori_w = self.gt.size()[2:4]
 
             # ----------------------- The first degradation process ----------------------- #
             # blur
-            out = filter2D(self.gt_usm, self.kernel1)
+            out = filter2D(self.gt, self.kernel1)
             # random resize
             updown_type = random.choices(['up', 'down', 'keep'], self.opt['resize_prob'])[0]
             if updown_type == 'up':
@@ -124,7 +126,7 @@ class RealESRGANModel(SRGANModel):
                 scale = 1
             mode = random.choice(['area', 'bilinear', 'bicubic'])
             out = F.interpolate(
-                out, size=(int(ori_h / self.opt['scale'] * scale), int(ori_w / self.opt['scale'] * scale)), mode=mode)
+                out, size=(int(ori_h / 4 * scale), int(ori_w / 4 * scale)), mode=mode)
             # add noise
             gray_noise_prob = self.opt['gray_noise_prob2']
             if np.random.uniform() < self.opt['gaussian_noise_prob2']:
@@ -148,7 +150,7 @@ class RealESRGANModel(SRGANModel):
             if np.random.uniform() < 0.5:
                 # resize back + the final sinc filter
                 mode = random.choice(['area', 'bilinear', 'bicubic'])
-                out = F.interpolate(out, size=(ori_h // self.opt['scale'], ori_w // self.opt['scale']), mode=mode)
+                out = F.interpolate(out, size=(ori_h // 4, ori_w // 4), mode=mode)
                 out = filter2D(out, self.sinc_kernel)
                 # JPEG compression
                 jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.opt['jpeg_range2'])
@@ -161,7 +163,7 @@ class RealESRGANModel(SRGANModel):
                 out = self.jpeger(out, quality=jpeg_p)
                 # resize back + the final sinc filter
                 mode = random.choice(['area', 'bilinear', 'bicubic'])
-                out = F.interpolate(out, size=(ori_h // self.opt['scale'], ori_w // self.opt['scale']), mode=mode)
+                out = F.interpolate(out, size=(ori_h // 4, ori_w // 4), mode=mode)
                 out = filter2D(out, self.sinc_kernel)
 
             # clamp and round
@@ -169,13 +171,11 @@ class RealESRGANModel(SRGANModel):
 
             # random crop
             gt_size = self.opt['gt_size']
-            (self.gt, self.gt_usm), self.lq = paired_random_crop([self.gt, self.gt_usm], self.lq, gt_size,
-                                                                 self.opt['scale'])
+            self.gt, self.lq = paired_random_crop(self.S_gt, self.lq, gt_size, 1)
+            # print("gt.size:",self.gt.size(),"lq.size:",self.lq.size())
 
             # training pair pool
             self._dequeue_and_enqueue()
-            # sharpen self.gt again, as we have changed the self.gt with self._dequeue_and_enqueue
-            self.gt_usm = self.usm_sharpener(self.gt)
             self.lq = self.lq.contiguous()  # for the warning: grad and param do not obey the gradient layout contract
         else:
             # for paired training or validation
@@ -187,81 +187,5 @@ class RealESRGANModel(SRGANModel):
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         # do not use the synthetic process during validation
         self.is_train = False
-        super(RealESRGANModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        super(SPicRealESRNetModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
         self.is_train = True
-
-    def optimize_parameters(self, current_iter):
-        # usm sharpening
-        l1_gt = self.gt_usm
-        percep_gt = self.gt_usm
-        gan_gt = self.gt_usm
-        if self.opt['l1_gt_usm'] is False:
-            l1_gt = self.gt
-        if self.opt['percep_gt_usm'] is False:
-            percep_gt = self.gt
-        if self.opt['gan_gt_usm'] is False:
-            gan_gt = self.gt
-
-        # optimize net_g
-        for p in self.net_d.parameters():
-            p.requires_grad = False
-
-        self.optimizer_g.zero_grad()
-        self.output = self.net_g(self.lq)
-        if self.cri_ldl:
-            self.output_ema = self.net_g_ema(self.lq)
-
-        l_g_total = 0
-        loss_dict = OrderedDict()
-        if (current_iter % self.net_d_iters == 0 and current_iter > self.net_d_init_iters):
-            # pixel loss
-            if self.cri_pix:
-                l_g_pix = self.cri_pix(self.output, l1_gt)
-                l_g_total += l_g_pix
-                loss_dict['l_g_pix'] = l_g_pix
-            if self.cri_ldl:
-                pixel_weight = get_refined_artifact_map(self.gt, self.output, self.output_ema, 7)
-                l_g_ldl = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
-                l_g_total += l_g_ldl
-                loss_dict['l_g_ldl'] = l_g_ldl
-            # perceptual loss
-            if self.cri_perceptual:
-                l_g_percep, l_g_style = self.cri_perceptual(self.output, percep_gt)
-                if l_g_percep is not None:
-                    l_g_total += l_g_percep
-                    loss_dict['l_g_percep'] = l_g_percep
-                if l_g_style is not None:
-                    l_g_total += l_g_style
-                    loss_dict['l_g_style'] = l_g_style
-            # gan loss
-            fake_g_pred = self.net_d(self.output)
-            l_g_gan = self.cri_gan(fake_g_pred, True, is_disc=False)
-            l_g_total += l_g_gan
-            loss_dict['l_g_gan'] = l_g_gan
-
-            l_g_total.backward()
-            self.optimizer_g.step()
-
-        # optimize net_d
-        for p in self.net_d.parameters():
-            p.requires_grad = True
-
-        self.optimizer_d.zero_grad()
-        # real
-        real_d_pred = self.net_d(gan_gt)
-        l_d_real = self.cri_gan(real_d_pred, True, is_disc=True)
-        loss_dict['l_d_real'] = l_d_real
-        loss_dict['out_d_real'] = torch.mean(real_d_pred.detach())
-        l_d_real.backward()
-        # fake
-        fake_d_pred = self.net_d(self.output.detach().clone())  # clone for pt1.9
-        l_d_fake = self.cri_gan(fake_d_pred, False, is_disc=True)
-        loss_dict['l_d_fake'] = l_d_fake
-        loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())
-        l_d_fake.backward()
-        self.optimizer_d.step()
-
-        if self.ema_decay > 0:
-            self.model_ema(decay=self.ema_decay)
-
-        self.log_dict = self.reduce_loss_dict(loss_dict)

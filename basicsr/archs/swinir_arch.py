@@ -3,13 +3,12 @@
 # Originally Written by Ze Liu, Modified by Jingyun Liang.
 
 import math
-from turtle import width
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 
 from basicsr.utils.registry import ARCH_REGISTRY
-from arch_util import to_2tuple, trunc_normal_
+from .arch_util import to_2tuple, trunc_normal_
 
 
 def drop_path(x, drop_prob: float = 0., training: bool = False):
@@ -663,7 +662,7 @@ class Upsample(nn.Sequential):
             m.append(nn.Conv2d(num_feat, 9 * num_feat, 3, 1, 1))
             m.append(nn.PixelShuffle(3))
         else:
-            raise ValueError(f'scale {scale} is not supported. ' 'Supported scales: 2^n and 3.')
+            raise ValueError(f'scale {scale} is not supported. Supported scales: 2^n and 3.')
         super(Upsample, self).__init__(*m)
 
 
@@ -691,7 +690,7 @@ class UpsampleOneStep(nn.Sequential):
         return flops
 
 
-# @ARCH_REGISTRY.register()
+@ARCH_REGISTRY.register()
 class SwinIR(nn.Module):
     r""" SwinIR
         A PyTorch impl of : `SwinIR: Image Restoration Using Swin Transformer`, based on Swin Transformer.
@@ -936,13 +935,11 @@ class SwinIR(nn.Module):
 
 if __name__ == '__main__':
     upscale = 4
-    window_size = 2
-    # height = (1024 // upscale // window_size + 1) * window_size
-    height = 32
-    # width = (720 // upscale // window_size + 1) * window_size
-    width = 32
+    window_size = 8
+    height = (1024 // upscale // window_size + 1) * window_size
+    width = (720 // upscale // window_size + 1) * window_size
     model = SwinIR(
-        upscale=4,
+        upscale=2,
         img_size=(height, width),
         window_size=window_size,
         img_range=1.,
@@ -951,7 +948,7 @@ if __name__ == '__main__':
         num_heads=[6, 6, 6, 6],
         mlp_ratio=2,
         upsampler='pixelshuffledirect')
-    # print(model)
+    print(model)
     print(height, width, model.flops() / 1e9)
 
     x = torch.randn((1, 3, height, width))

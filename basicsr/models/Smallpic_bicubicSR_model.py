@@ -3,6 +3,9 @@ import random
 import torch
 from collections import OrderedDict
 from torch.nn import functional as F
+import torch.nn as nn
+from copy import deepcopy
+from basicsr.archs import build_network
 
 from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 from basicsr.data.transforms import paired_random_crop
@@ -11,10 +14,20 @@ from basicsr.models.srgan_model import SRGANModel
 from basicsr.utils import DiffJPEG, USMSharp
 from basicsr.utils.img_process_util import filter2D
 from basicsr.utils.registry import MODEL_REGISTRY
+from basicsr.archs.rrdbnet_arch import RRDBNet
+
+class fix_degrax1(nn.Module):
+    def __init__(self,
+    **kwargs) -> None:
+        super().__init__()
+        self.model = RRDBNet(num_in_ch=3,num_out_ch=3,scale=1)
+    def forward(self,x):
+        x = self.model(x)
+        return x
 
 
 @MODEL_REGISTRY.register(suffix='basicsr')
-class RealESRGANModel(SRGANModel):
+class SpicBicubicSRModel(SRGANModel):
     """RealESRGAN Model for Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data.
 
     It mainly performs:
@@ -23,7 +36,19 @@ class RealESRGANModel(SRGANModel):
     """
 
     def __init__(self, opt):
-        super(RealESRGANModel, self).__init__(opt)
+        super(SpicBicubicSRModel, self).__init__(opt)
+        # define network
+        self.net_g = build_network(opt['network_g'])
+        self.net_g = self.model_to_device(self.net_g)
+        self.print_network(self.net_g)
+
+        # load pretrained models
+        load_path = self.opt['path'].get('pretrain_network_g', None)
+        if load_path is not None:
+            param_key = self.opt['path'].get('param_key_g', 'params')
+            self.load_network(self.net_g, load_path, self.opt['path'].get('strict_load_g', True), param_key)
+        self.net_degra.eval()
+
         self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
         self.usm_sharpener = USMSharp().cuda()  # do usm sharpening
         self.queue_size = opt.get('queue_size', 180)
@@ -165,7 +190,34 @@ class RealESRGANModel(SRGANModel):
                 out = filter2D(out, self.sinc_kernel)
 
             # clamp and round
-            self.lq = torch.clamp((out * 255.0).round(), 0, 255) / 255.
+            degra_img = torch.clamp((out * 255.0).round(), 0, 255) / 255.
+
+            # # load x1 model
+            # self.fix_degra_net = build_network(self.opt['network_degra'])
+            # fix_degra_path = "/home/yqliu/projects/Real-ESRGAN/experiments/020_train_RealESRNet_on_smallpic_x1plus_1000k_B9G4/models/net_g_980000.pth"
+            # fix_degra_net = self.load_network(self.fix_degra_net,fix_degra_path,strict=True, param_key='params')
+            # self.lq = fix_degra_net(degra_img)
+
+            # load x1 model
+            fix_degra_net = fix_degrax1()
+            fix_degra_path = "/home/yqliu/projects/Real-ESRGAN/experiments/020_train_RealESRNet_on_smallpic_x1plus_1000k_B9G4/models/net_g_980000.pth"
+            dict_trained = torch.load(fix_degra_path,map_location=lambda storage, loc: storage)
+            param_key = 'params'
+            dict_trained = dict_trained[param_key]
+            # remove unnecessary 'module.'
+            for k, v in deepcopy(dict_trained).items():
+                new_k = 'model.'+ k
+                dict_trained[new_k] = dict_trained.pop(k)
+                # if k.startswith('module.'):
+                #     dict_trained[k[7:]] = v
+                #     dict_trained.pop(k)
+            # print("dict_trained",dict_trained)
+            fix_degra_net.load_state_dict(dict_trained, strict=True)
+            fix_degra_net = fix_degra_net.to(self.device)
+            for name, parameter in fix_degra_net.named_parameters():
+                parameter.requires_grad = False
+            # print("degra_img",degra_img.size())
+            self.lq = fix_degra_net(degra_img)
 
             # random crop
             gt_size = self.opt['gt_size']
@@ -187,7 +239,7 @@ class RealESRGANModel(SRGANModel):
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         # do not use the synthetic process during validation
         self.is_train = False
-        super(RealESRGANModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        super(SpicBicubicSRModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
         self.is_train = True
 
     def optimize_parameters(self, current_iter):
@@ -202,11 +254,14 @@ class RealESRGANModel(SRGANModel):
         if self.opt['gan_gt_usm'] is False:
             gan_gt = self.gt
 
+
         # optimize net_g
         for p in self.net_d.parameters():
             p.requires_grad = False
 
         self.optimizer_g.zero_grad()
+        with torch.no_grad():
+            self.lq=self.net_degra(self.lq)
         self.output = self.net_g(self.lq)
         if self.cri_ldl:
             self.output_ema = self.net_g_ema(self.lq)

@@ -17,9 +17,9 @@ class classSR_3class_swinir_syn(nn.Module):
         self.upscale=4
         self.classifier=Classifier()
         self.net1 = SynSwinIR_Fix0(img_size=32, in_chans=in_chans, depths=(6, 6, 6, 6), num_heads=(6, 6, 6, 6),
-         embed_dim=60, window_size=8, mlp_ratio=2.,upscale=4, upsampler='pixelshuffle', resi_connection='1conv',attn_type='fact_dense_pose3')
+         embed_dim=60, window_size=8, mlp_ratio=2.,upscale=4, upsampler='pixelshuffledirect', resi_connection='1conv',attn_type='fact_dense_pose3')
         self.net2 = SynSwinIR_Fix0(img_size=32, in_chans=in_chans, depths=(6, 6, 6, 6), num_heads=(6, 6, 6, 6),
-         embed_dim=60, window_size=8, mlp_ratio=2.,upscale=4, upsampler='pixelshuffle', resi_connection='1conv',attn_type='vanilla_kout')
+         embed_dim=60, window_size=8, mlp_ratio=2.,upscale=4, upsampler='pixelshuffledirect', resi_connection='1conv',attn_type='vanilla_kout')
         self.net3 = SwinIR(img_size=32, in_chans=in_chans, depths=(6, 6, 6, 6), num_heads=(6, 6, 6, 6),
          embed_dim=60, window_size=8, mlp_ratio=2.,upscale=4, upsampler='pixelshuffledirect', resi_connection='1conv')
 
@@ -27,15 +27,20 @@ class classSR_3class_swinir_syn(nn.Module):
         if is_train:
             for i in range(len(x)):
                 # print(x[i].unsqueeze(0).shape)
+                # x = [N, C, H, W], len(x)=N
                 type = self.classifier(x[i].unsqueeze(0))
+                # x[0] = [C, H, W], x[0].unsqueeze(0) = [1, C, H, W]
+                # type is probability
                 p = F.softmax(type, dim=1)
                 p1 = p[0][0]
                 p2 = p[0][1]
                 p3 = p[0][2]
+                # x[0] have three kinds
 
                 out1 = self.net1(x[i].unsqueeze(0))
                 out2 = self.net2(x[i].unsqueeze(0))
                 out3 = self.net3(x[i].unsqueeze(0))
+                # a picture is synthesized from multiple parts
 
                 out = out1 * p1 + out2 * p2 + out3 * p3
                 if i == 0:
@@ -44,6 +49,7 @@ class classSR_3class_swinir_syn(nn.Module):
                 else:
                     out_res = torch.cat((out_res, out), 0)
                     type_res = torch.cat((type_res, p), 0)
+                    # concat all x[i] probability
         else:
 
             for i in range(len(x)):
@@ -81,11 +87,12 @@ class Classifier(nn.Module):
                                      nn.Conv2d(128, 128, 1), nn.LeakyReLU(0.1, True),
                                      nn.Conv2d(128, 128, 1), nn.LeakyReLU(0.1, True),
                                      nn.Conv2d(128, 32, 1))
+        # nn.conv2d(in_channels, out_channels, kernel_size, stride, padding)
         initialize_weights([self.CondNet], 0.1)
     def forward(self, x):
         out = self.CondNet(x)
         out = nn.AvgPool2d(out.size()[2])(out)
-        out = out.view(out.size(0), -1)
+        out = out.view(out.size(0), -1) #flatten the last dimension
         out = self.lastOut(out)
         return out
 

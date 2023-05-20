@@ -1,20 +1,19 @@
 import numpy as np
 import random
 import torch
-from collections import OrderedDict
-from torch.nn import functional as F
-
 from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 from basicsr.data.transforms import paired_random_crop
-from basicsr.losses.loss_util import get_refined_artifact_map
 from basicsr.models.srgan_model import SRGANModel
+from basicsr.models.sr_pjdgan_model import SRPjdGANModel
 from basicsr.utils import DiffJPEG, USMSharp
 from basicsr.utils.img_process_util import filter2D
 from basicsr.utils.registry import MODEL_REGISTRY
+from collections import OrderedDict
+from torch.nn import functional as F
 
 
-@MODEL_REGISTRY.register(suffix='basicsr')
-class RealESRGANModel(SRGANModel):
+@MODEL_REGISTRY.register()
+class SRRealPjdGANModel(SRPjdGANModel):
     """RealESRGAN Model for Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data.
 
     It mainly performs:
@@ -23,7 +22,7 @@ class RealESRGANModel(SRGANModel):
     """
 
     def __init__(self, opt):
-        super(RealESRGANModel, self).__init__(opt)
+        super(SRRealPjdGANModel, self).__init__(opt)
         self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
         self.usm_sharpener = USMSharp().cuda()  # do usm sharpening
         self.queue_size = opt.get('queue_size', 180)
@@ -187,7 +186,7 @@ class RealESRGANModel(SRGANModel):
     def nondist_validation(self, dataloader, current_iter, tb_logger, save_img):
         # do not use the synthetic process during validation
         self.is_train = False
-        super(RealESRGANModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
+        super(SRRealPjdGANModel, self).nondist_validation(dataloader, current_iter, tb_logger, save_img)
         self.is_train = True
 
     def optimize_parameters(self, current_iter):
@@ -208,8 +207,7 @@ class RealESRGANModel(SRGANModel):
 
         self.optimizer_g.zero_grad()
         self.output = self.net_g(self.lq)
-        if self.cri_ldl:
-            self.output_ema = self.net_g_ema(self.lq)
+        # print("self.output.size()",self.output.size())
 
         l_g_total = 0
         loss_dict = OrderedDict()
@@ -219,11 +217,6 @@ class RealESRGANModel(SRGANModel):
                 l_g_pix = self.cri_pix(self.output, l1_gt)
                 l_g_total += l_g_pix
                 loss_dict['l_g_pix'] = l_g_pix
-            if self.cri_ldl:
-                pixel_weight = get_refined_artifact_map(self.gt, self.output, self.output_ema, 7)
-                l_g_ldl = self.cri_ldl(torch.mul(pixel_weight, self.output), torch.mul(pixel_weight, self.gt))
-                l_g_total += l_g_ldl
-                loss_dict['l_g_ldl'] = l_g_ldl
             # perceptual loss
             if self.cri_perceptual:
                 l_g_percep, l_g_style = self.cri_perceptual(self.output, percep_gt)
@@ -234,7 +227,8 @@ class RealESRGANModel(SRGANModel):
                     l_g_total += l_g_style
                     loss_dict['l_g_style'] = l_g_style
             # gan loss
-            fake_g_pred = self.net_d(self.output)
+            fake_g_pred = self.net_d(self.output,self.output.size(1))
+            # print("fake_g_pred",fake_g_pred)
             l_g_gan = self.cri_gan(fake_g_pred, True, is_disc=False)
             l_g_total += l_g_gan
             loss_dict['l_g_gan'] = l_g_gan
@@ -248,13 +242,13 @@ class RealESRGANModel(SRGANModel):
 
         self.optimizer_d.zero_grad()
         # real
-        real_d_pred = self.net_d(gan_gt)
+        real_d_pred = self.net_d(gan_gt, gan_gt.size(1))
         l_d_real = self.cri_gan(real_d_pred, True, is_disc=True)
         loss_dict['l_d_real'] = l_d_real
         loss_dict['out_d_real'] = torch.mean(real_d_pred.detach())
         l_d_real.backward()
         # fake
-        fake_d_pred = self.net_d(self.output.detach().clone())  # clone for pt1.9
+        fake_d_pred = self.net_d(self.output.detach().clone(), self.output.size(1))  # clone for pt1.9
         l_d_fake = self.cri_gan(fake_d_pred, False, is_disc=True)
         loss_dict['l_d_fake'] = l_d_fake
         loss_dict['out_d_fake'] = torch.mean(fake_d_pred.detach())

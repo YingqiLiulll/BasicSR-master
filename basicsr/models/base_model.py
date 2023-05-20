@@ -4,7 +4,6 @@ import torch
 from collections import OrderedDict
 from copy import deepcopy
 from torch.nn.parallel import DataParallel, DistributedDataParallel
-
 from basicsr.models import lr_scheduler as lr_scheduler
 from basicsr.utils import get_root_logger
 from basicsr.utils.dist_util import master_only
@@ -104,9 +103,19 @@ class BaseModel():
         if optim_type == 'Adam':
             optimizer = torch.optim.Adam(params, lr, **kwargs)
         elif optim_type == 'AdamW':
-            optimizer = torch.optim.AdamW(params, lr ,**kwargs)
+            optimizer = torch.optim.AdamW(params, lr, **kwargs)
+        elif optim_type == 'Adamax':
+            optimizer = torch.optim.Adamax(params, lr, **kwargs)
+        elif optim_type == 'SGD':
+            optimizer = torch.optim.SGD(params, lr, **kwargs)
+        elif optim_type == 'ASGD':
+            optimizer = torch.optim.ASGD(params, lr, **kwargs)
+        elif optim_type == 'RMSprop':
+            optimizer = torch.optim.RMSprop(params, lr, **kwargs)
+        elif optim_type == 'Rprop':
+            optimizer = torch.optim.Rprop(params, lr, **kwargs)
         else:
-            raise NotImplementedError(f'optimizer {optim_type} is not supperted yet.')
+            raise NotImplementedError(f'optimizer {optim_type} is not supported yet.')
         return optimizer
 
     def setup_schedulers(self):
@@ -151,7 +160,7 @@ class BaseModel():
         logger.info(net_str)
 
     def _set_lr(self, lr_groups_l):
-        """Set learning rate for warmup.
+        """Set learning rate for warm-up.
 
         Args:
             lr_groups_l (list): List for lr_groups, each for an optimizer.
@@ -173,7 +182,7 @@ class BaseModel():
 
         Args:
             current_iter (int): Current iteration.
-            warmup_iter (int)： Warmup iter numbers. -1 for no warmup.
+            warmup_iter (int)： Warm-up iter numbers. -1 for no warm-up.
                 Default： -1.
         """
         if current_iter > 1:
@@ -303,6 +312,224 @@ class BaseModel():
                 load_net.pop(k)
         self._print_different_keys_loading(net, load_net, strict)
         net.load_state_dict(load_net, strict=strict)
+
+    def load_network_classifier(self, net, load_path, strict=True, param_key='params'):
+        """Load network.
+
+        Args:
+            load_path (str): The path of networks to be loaded.
+            net (nn.Module): Network.
+            strict (bool): Whether strictly loaded.
+            param_key (str): The parameter key of loaded network. If set to
+                None, use the root 'path'.
+                Default: 'params'.
+        """
+        logger = get_root_logger()
+        if isinstance(net, (DataParallel, DistributedDataParallel)):
+            net = net.module.classifier
+        load_net = torch.load(load_path, map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net.load_state_dict(load_net, strict=strict)
+
+    def load_network_classSR_2class(self, net, load_path, strict=True, param_key='params'):
+        """Load network.
+
+        Args:
+            load_path (str): The path of networks to be loaded.
+            net (nn.Module): Network.
+            strict (bool): Whether strictly loaded.
+            param_key (str): The parameter key of loaded network. If set to
+                None, use the root 'path'.
+                Default: 'params'.
+        """
+        logger = get_root_logger()
+
+        if isinstance(net, (DataParallel, DistributedDataParallel)):
+            net1 = net.module.net1
+            net2 = net.module.net2
+        load_net = torch.load(load_path[0], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net1.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[1], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net2.load_state_dict(load_net, strict=strict)
+
+    def load_network_classSR_3class(self, net, load_path, strict=True, param_key='params'):
+        """Load network.
+
+        Args:
+            load_path (str): The path of networks to be loaded.
+            net (nn.Module): Network.
+            strict (bool): Whether strictly loaded.
+            param_key (str): The parameter key of loaded network. If set to
+                None, use the root 'path'.
+                Default: 'params'.
+        """
+        logger = get_root_logger()
+        network1 = self.get_bare_model(net).net1
+        network2 = self.get_bare_model(net).net2
+        network3 = self.get_bare_model(net).net3
+        # if isinstance(net, (DataParallel, DistributedDataParallel)):
+        #     # global network1
+        #     network1 = net.module.net1
+        #     network2 = net.module.net2
+        #     network3 = net.module.net3
+        load_net = torch.load(load_path[0], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        network1.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[1], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        network2.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[2], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        network3.load_state_dict(load_net, strict=strict)
+
+    def load_network_classSR_4class(self, net, load_path, strict=True, param_key='params'):
+        """Load network.
+
+        Args:
+            load_path (str): The path of networks to be loaded.
+            net (nn.Module): Network.
+            strict (bool): Whether strictly loaded.
+            param_key (str): The parameter key of loaded network. If set to
+                None, use the root 'path'.
+                Default: 'params'.
+        """
+        logger = get_root_logger()
+
+        if isinstance(net, (DataParallel, DistributedDataParallel)):
+            net1 = net.module.net1
+            net2 = net.module.net2
+            net3 = net.module.net3
+            net4 = net.module.net4
+        load_net = torch.load(load_path[0], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net1.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[1], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net2.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[2], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net3.load_state_dict(load_net, strict=strict)
+
+        load_net = torch.load(load_path[3], map_location=lambda storage, loc: storage)
+        if param_key is not None:
+            if param_key not in load_net and 'params' in load_net:
+                param_key = 'params'
+                logger.info('Loading: params_ema does not exist, use params.')
+            load_net = load_net[param_key]
+        logger.info(f'Loading {net.__class__.__name__} model from {load_path}, with param key: [{param_key}].')
+        # remove unnecessary 'module.'
+        for k, v in deepcopy(load_net).items():
+            if k.startswith('module.'):
+                load_net[k[7:]] = v
+                load_net.pop(k)
+        self._print_different_keys_loading(net, load_net, strict)
+        net4.load_state_dict(load_net, strict=strict)
 
     @master_only
     def save_training_state(self, epoch, current_iter):
